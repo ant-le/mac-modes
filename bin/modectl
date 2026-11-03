@@ -1,0 +1,8 @@
+#!/bin/zsh
+set -euo pipefail
+MODE_ROOT="${0:A:h:h}"
+if [[ -x "$MODE_ROOT/.build/debug/modectl" ]]; then
+  export MAC_MODES_CONFIG_DIR="$MODE_ROOT/config"
+  exec "$MODE_ROOT/.build/debug/modectl" "$@"
+fi
+exec "$HOME/Applications/Mac Modes.app/Contents/MacOS/modectl" "$@"

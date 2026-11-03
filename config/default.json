@@ -1,0 +1,24 @@
+{
+  "poll_seconds": 2,
+  "auto_coding_on_t3_launch": true,
+  "normal_on_t3_quit": true,
+  "confirm_stop_workloads": true,
+  "connection_timeout_seconds": 60,
+  "tailscale": "/usr/local/bin/tailscale",
+  "orbctl": "/opt/homebrew/bin/orbctl",
+  "docker": "/usr/local/bin/docker",
+  "t3_bundle": "com.t3tools.t3code",
+  "music_bundle": "com.native-instruments.Traktor",
+  "zen_executable": "/Applications/Zen.app/Contents/MacOS/zen",
+  "proton_bundle": "ch.protonvpn.mac",
+  "proton_process": "ProtonVPN",
+  "egress_check_url": "https://api.protonvpn.ch/vpn/location",
+  "private_profile": "~/Library/Application Support/MacModes/zen-private",
+  "private_downloads": "~/Downloads/Private Browsing",
+  "proton_kill_switch_setup_verified": true,
+  "proton_service": "ProtonVPN",
+  "close_apps_on_exit": {
+    "coding": false,
+    "music": false
+  }
+}
