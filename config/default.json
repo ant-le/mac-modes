@@ -11,14 +11,12 @@
   "music_bundle": "com.native-instruments.Traktor",
   "zen_executable": "/Applications/Zen.app/Contents/MacOS/zen",
   "proton_bundle": "ch.protonvpn.mac",
-  "proton_process": "ProtonVPN",
   "egress_check_url": "https://api.protonvpn.ch/vpn/location",
-  "private_profile": "~/Library/Application Support/MacModes/zen-private",
-  "private_downloads": "~/Downloads/Private Browsing",
-  "proton_kill_switch_setup_verified": true,
+  "proton_kill_switch_setup_verified": false,
   "proton_service": "ProtonVPN",
   "close_apps_on_exit": {
     "coding": false,
     "music": false
-  }
+  },
+  "t3_quit_debounce_seconds": 8
 }

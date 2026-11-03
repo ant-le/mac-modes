@@ -7,7 +7,7 @@ let home=fm.homeDirectoryForCurrentUser
 let runtime=home.appendingPathComponent("Library/Application Support/MacModes")
 let agents=home.appendingPathComponent("Library/LaunchAgents")
 let app=home.appendingPathComponent("Applications/Mac Modes.app")
-let backup=runtime.appendingPathComponent("backups/swift-migration-"+String(Int(Date().timeIntervalSince1970)))
+let backup=runtime.appendingPathComponent("backups/deployment-"+String(Int(Date().timeIntervalSince1970)))
 func run(_ args:[String], check:Bool=true) throws {
     let p=Process();p.executableURL=URL(fileURLWithPath:args[0]);p.arguments=Array(args.dropFirst());try p.run();p.waitUntilExit()
     if check && p.terminationStatus != 0 { throw NSError(domain:args[0],code:Int(p.terminationStatus)) }
@@ -32,11 +32,14 @@ if fm.fileExists(atPath:stateFile.path) {
     try fm.copyItem(at:stateFile,to:backup.appendingPathComponent("state.json"))
     var state=try json(stateFile)
     // Focus/AirDrop stay as the user left them; the new controller no longer owns them.
-    state["dnd_owned"]=false;state["airdrop_owned"]=false
+    for key in ["dnd_owned", "airdrop_owned", "heartbeat"] { state.removeValue(forKey:key) }
     try JSONSerialization.data(withJSONObject:state,options:[.prettyPrinted,.sortedKeys]).write(to:stateFile,options:.atomic)
 }
+let shell="#!/bin/zsh\nexec \"$HOME/Applications/Mac Modes.app/Contents/MacOS/modectl\" \"$@\"\n"
 let legacyApp=runtime.appendingPathComponent("app")
-if fm.fileExists(atPath:legacyApp.path) {
+let legacyEntries = (fm.enumerator(at:legacyApp,includingPropertiesForKeys:nil)?.allObjects as? [URL] ?? []).map { String($0.path.dropFirst(legacyApp.path.count + 1)) }
+if legacyEntries.contains(where: { !["bin", "bin/modectl"].contains($0) }) ||
+    (fm.fileExists(atPath:legacyApp.path) && (try? String(contentsOf:legacyApp.appendingPathComponent("bin/modectl"),encoding:.utf8)) != shell) {
     try fm.moveItem(at:legacyApp,to:backup.appendingPathComponent("legacy-deployment"))
 }
 if fm.fileExists(atPath:app.path) { try fm.moveItem(at:app,to:backup.appendingPathComponent("Mac Modes.app")) }
@@ -47,8 +50,8 @@ if fm.fileExists(atPath:overrides.path) {
     let destination=runtime.appendingPathComponent("config.json")
     if !fm.fileExists(atPath:destination.path) { try fm.copyItem(at:overrides,to:destination) }
 }
-// Changing resources invalidates an ad-hoc bundle signature.
-try run(["/usr/bin/codesign","--force","--sign","-",app.path])
+// Preserve the build signature; runtime overrides live outside the bundle.
+try run(["/usr/bin/codesign","--verify","--strict",app.path])
 let launchers=home.appendingPathComponent("Applications/Mac Modes Launchers")
 if fm.fileExists(atPath:launchers.path) { try fm.moveItem(at:launchers,to:backup.appendingPathComponent("Logitech Launchers")) }
 try fm.copyItem(at:root.appendingPathComponent("build/standalone/Logitech Launchers"),to:launchers)
@@ -69,9 +72,10 @@ if var services=CFPreferencesCopyAppValue(key,domain) as? [String:[String:Any]] 
 let oldBin=runtime.appendingPathComponent("app/bin")
 try fm.createDirectory(at:oldBin,withIntermediateDirectories:true)
 let shim=oldBin.appendingPathComponent("modectl")
-let shell="#!/bin/zsh\nexec \"$HOME/Applications/Mac Modes.app/Contents/MacOS/modectl\" \"$@\"\n"
-try shell.write(to:shim,atomically:true,encoding:.utf8)
-try fm.setAttributes([.posixPermissions:0o755],ofItemAtPath:shim.path)
+if (try? String(contentsOf:shim,encoding:.utf8)) != shell {
+    try shell.write(to:shim,atomically:true,encoding:.utf8)
+    try fm.setAttributes([.posixPermissions:0o755],ofItemAtPath:shim.path)
+}
 try run(["/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister","-f",app.path])
 try fm.createDirectory(at:agents,withIntermediateDirectories:true)
 let agent=agents.appendingPathComponent("local.mac-modes.menubar.plist")
@@ -81,3 +85,9 @@ try fm.setAttributes([.posixPermissions:0o600],ofItemAtPath:agent.path)
 flock(lockFD,LOCK_UN);close(lockFD)
 try run(["/bin/launchctl","bootstrap","gui/\(getuid())",agent.path])
 print("Installed \(app.path). Previous state/agents saved in \(backup.path)")
+
+// Prune only our deployment snapshots after a successful install.
+let backups = try fm.contentsOfDirectory(at:runtime.appendingPathComponent("backups"),includingPropertiesForKeys:[.creationDateKey,.isDirectoryKey])
+    .filter { ($0.lastPathComponent.hasPrefix("deployment-") || $0.lastPathComponent.hasPrefix("swift-migration-")) && (try? $0.resourceValues(forKeys:[.isDirectoryKey]).isDirectory) == true }
+    .sorted { ((try? $0.resourceValues(forKeys:[.creationDateKey]).creationDate) ?? .distantPast) > ((try? $1.resourceValues(forKeys:[.creationDateKey]).creationDate) ?? .distantPast) }
+for old in backups.dropFirst(5) { try fm.removeItem(at:old) }

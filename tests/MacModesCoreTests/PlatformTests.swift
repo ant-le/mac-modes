@@ -10,6 +10,7 @@ final class PlatformTests {
     }
     func testUnknownProtonStatePreserved() throws {
         let result=try MacPlatform.parseProton("* (Reasserting) ABCDEF01-2345-6789-ABCD-0123456789AB VPN ProtonVPN")
+        expectThrows(try MacPlatform.parseProton("* malformed ProtonVPN"))
         expectEqual(result.count,1);expectEqual(result.first?.1,"Reasserting")
     }
     func testCommandTimeoutAndFailure() throws {

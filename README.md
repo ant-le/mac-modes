@@ -14,8 +14,8 @@ command-line tools to build. No third-party Swift packages.
 
 Install and authenticate the apps you use. Focus/DND and AirDrop stay under manual
 control. Leaving Coding asks before stopping running OrbStack workloads.
-Launching T3 enters Coding (with confirmation from Music or Private); quitting it
-returns active Coding to Normal. Normal is the reboot default.
+Launching T3 enters Coding only from Normal. Quitting it returns active Coding
+to Normal after an eight-second grace period; restarting T3 cancels that return. Normal is the reboot default.
 
 ## Install
 
@@ -27,7 +27,8 @@ bin/modectl status
 Run the installer again to update. It installs `~/Applications/Mac Modes.app`,
 launchers in `~/Applications/Mac Modes Launchers`, and a login agent. Configuration
 and state are preserved; deployment backups live under
-`~/Library/Application Support/MacModes/backups`.
+`~/Library/Application Support/MacModes/backups`; the latest five deployment
+snapshots are retained.
 
 ## Controls and permissions
 
@@ -50,7 +51,7 @@ text to the clipboard; cancellation or no text leaves it unchanged. Allow
 **Screen Recording** in System Settings → Privacy & Security when prompted.
 For T3/Traktor window resizing, use **Settings → Allow window resizing…** in the
 app menu to grant **Accessibility** access. Switching overlays can also be disabled
-in Settings.
+in Settings. Failure alerts remain enabled.
 
 Automation supports `macmodes://toggle/coding`, `macmodes://toggle/music`,
 `macmodes://toggle/private`, `macmodes://set/normal`, and `macmodes://ocr`, or the CLI:
@@ -63,6 +64,9 @@ bin/modectl status
 bin/modectl doctor
 bin/modectl ocr
 ```
+
+URL requests that leave Coding or Music require confirmation. All requests leaving
+Private require confirmation to close Privacy-container tabs first.
 
 After fixing a failed transition, retry with `set <mode>`. State and logs are in
 `~/Library/Application Support/MacModes`.
@@ -86,7 +90,9 @@ respond and retry. Apps are never force-quit; Zen stays open.
 
 ## Private mode
 
-Keep Proton's kill switch enabled. Private checks VPN connectivity, tunnel routing,
+Enable and verify Proton's kill switch, then explicitly set
+`proton_kill_switch_setup_verified` to `true` in your runtime config. Fresh installs
+default to `false` and refuse Private entry until you confirm setup. Private checks VPN connectivity, tunnel routing,
 and Proton's location endpoint before opening Zen, then monitors the connection.
 A failed check reports an error; it cannot guarantee zero leaks or close sensitive
 tabs for you. Close those tabs before leaving Private: Zen stays open while Proton
@@ -105,7 +111,19 @@ in `tests/MacModesCoreTests` avoid changing live VPNs or quitting apps. Permissi
 Ring clicks, region selection, and window layouts need manual checks.
 
 Build output is `build/standalone/` and `build/MacModes-standalone.zip`. Bundles are
-ad-hoc signed for local use, not notarized.
+signed with `MAC_MODES_SIGNING_IDENTITY` when set, or the local `Mac Modes`
+identity when available. Otherwise builds use ad-hoc signing and print a warning.
+Use the same certificate across rebuilds for stable signing identity; macOS may
+still require an initial Accessibility/Screen Recording approval. Bundles are not
+notarized. The installer preserves the build signature.
+
+The request queue remains durable on disk and wakes through directory events.
+State updates reach the menu bar in memory. Health checks remain periodic; there
+are no heartbeat writes. Failed config reloads keep the privacy monitor on its
+last valid configuration.
+
+If Apple Vision stalls during tests, run `swift run --build-system native ModeTests
+--skip-ocr` to check the remaining regressions; this leaves OCR unverified.
 
 ## Disable login startup
 

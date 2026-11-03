@@ -37,10 +37,10 @@ public func readConfig(_ directory: URL) throws -> JSON {
     if FileManager.default.fileExists(atPath: userConfig.path) { result.merge(try readJSON(userConfig)) { _, new in new } }
     return result
 }
-public func enqueue(_ operation: String, _ mode: String, runtime: URL) throws -> URL {
+public func enqueue(_ operation: String, _ mode: String, runtime: URL, external: Bool = false) throws -> URL {
     guard ["set", "toggle"].contains(operation), Mode(rawValue: mode) != nil else { throw Failure("Invalid mode request") }
     let id = String(format: "%020llu", UInt64(Date().timeIntervalSince1970 * 1_000_000_000)) + "-" + UUID().uuidString + ".json"
-    try atomicJSON(["operation": operation, "mode": mode], to: runtime.appendingPathComponent("requests/" + id))
+    try atomicJSON(["operation": operation, "mode": mode, "external": external], to: runtime.appendingPathComponent("requests/" + id))
     return runtime.appendingPathComponent("results/" + id)
 }
 public final class RuntimeLock {
@@ -57,15 +57,4 @@ public func controllerOnline(_ runtime: URL) -> Bool {
     guard fd >= 0 else { return false }; defer { close(fd) }
     if flock(fd, LOCK_EX | LOCK_NB) == 0 { flock(fd, LOCK_UN); return false }
     return errno == EWOULDBLOCK
-}
-public struct OwnedApp: Codable, Equatable {
-    public let bundle: String
-    public let pid: Int32
-    public let launched_at: Double
-    public init(bundle: String, pid: Int32, launchedAt: Double) { self.bundle = bundle; self.pid = pid; self.launched_at = launchedAt }
-    public var json: JSON { ["bundle": bundle, "pid": pid, "launched_at": launched_at] }
-    public init?(_ json: JSON) {
-        guard let bundle = json["bundle"] as? String, let pid = json["pid"] as? NSNumber, let time = json["launched_at"] as? Double, time > 0 else { return nil }
-        self.init(bundle: bundle, pid: pid.int32Value, launchedAt: time)
-    }
 }

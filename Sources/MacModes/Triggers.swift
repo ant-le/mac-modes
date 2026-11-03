@@ -65,16 +65,21 @@ extension ModeBar {
         for url in urls where url.scheme?.lowercased() == "macmodes" {
             if url.host == "ocr" { startOCR(); continue }
             guard let verb = url.host, ["toggle", "set"].contains(verb), let mode = url.pathComponents.last, Mode(rawValue: mode) != nil else { continue }
-            requestMode(verb, mode)
+            requestMode(verb, mode, external: true)
         }
     }
-    func requestMode(_ operation: String, _ mode: String) {
-        do { _ = try enqueue(operation, mode, runtime: runtime) }
+    func requestMode(_ operation: String, _ mode: String, external: Bool = false) {
+        do { _ = try enqueue(operation, mode, runtime: runtime, external: external) }
         catch { showOverlay("Request failed", detail: error.localizedDescription, mode: mode, failed: true) }
     }
     func setupService() throws {
         let directory = ProcessInfo.processInfo.environment["MAC_MODES_CONFIG_DIR"].map { URL(fileURLWithPath: $0) } ?? Bundle.main.resourceURL!.appendingPathComponent("config")
         let service = ControllerService(runtime: runtime, configDirectory: directory)
+        service.stateChanged = { [weak self] value in
+            guard let data = try? JSONSerialization.data(withJSONObject: value),
+                  let state = try? JSONDecoder().decode(ModeState.self, from: data) else { return }
+            DispatchQueue.main.async { self?.currentState = state; self?.refresh() }
+        }
         service.confirmation = { message in
             var accepted = false
             DispatchQueue.main.sync {
@@ -90,8 +95,8 @@ extension ModeBar {
             }
             return accepted
         }
-        service.notification = { [weak self] text in
-            DispatchQueue.main.async { self?.showOverlay("Mac Modes", detail: text, mode: "normal") }
+        service.notification = { [weak self] text, critical in
+            DispatchQueue.main.async { self?.showOverlay("Mac Modes", detail: text, mode: "normal", failed: critical) }
         }
         try service.start(); self.service = service
         hotkeys = Hotkeys { [weak self] id in

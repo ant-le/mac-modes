@@ -1,5 +1,18 @@
 import Foundation
 let fm = FileManager.default
+func localIdentity() -> String? {
+    let process = Process(), pipe = Pipe()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+    process.arguments = ["find-identity", "-v", "-p", "codesigning"]
+    process.standardOutput = pipe
+    guard (try? process.run()) != nil else { return nil }
+    let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    process.waitUntilExit()
+    return output.components(separatedBy: .newlines).first(where: { $0.contains("\"Mac Modes\"") })?
+        .split(whereSeparator: { $0.isWhitespace }).dropFirst().first.map(String.init)
+}
+let identity = ProcessInfo.processInfo.environment["MAC_MODES_SIGNING_IDENTITY"] ?? localIdentity() ?? "-"
+if identity == "-" { print("No MAC_MODES_SIGNING_IDENTITY set; ad-hoc signing may require renewed privacy permissions.") }
 let root = URL(fileURLWithPath: fm.currentDirectoryPath)
 let binaries = URL(fileURLWithPath: CommandLine.arguments[1])
 let build = root.appendingPathComponent("build/standalone")
@@ -25,12 +38,13 @@ try fm.copyItem(at:root.appendingPathComponent("config"),to:resources.appendingP
 try? fm.removeItem(at:resources.appendingPathComponent("config/local.json"))
 try fm.copyItem(at:root.appendingPathComponent("README.md"),to:resources.appendingPathComponent("README.md"))
 try fm.copyItem(at:binaries.appendingPathComponent("modectl"),to:app.appendingPathComponent("Contents/MacOS/modectl"))
-try run(["/usr/bin/codesign","--force","--sign","-",app.path])
+try run(["/usr/bin/codesign","--force","--sign",identity,app.appendingPathComponent("Contents/MacOS/modectl").path])
+try run(["/usr/bin/codesign","--force","--sign",identity,app.path])
 for action in ["normal","coding","music","private","ocr"] {
     let name=action=="ocr" ? "Copy Screen Text" : "Mode "+action.capitalized
     let launcher=build.appendingPathComponent("Logitech Launchers/"+name+".app")
     try bundle(launcher,executable:"ModeLauncher",info:["CFBundleName":name,"CFBundleIdentifier":"local.mac-modes.launcher."+action,"MacModesAction":action])
-    try run(["/usr/bin/codesign","--force","--sign","-",launcher.path])
+    try run(["/usr/bin/codesign","--force","--sign",identity,launcher.path])
 }
 try run(["/usr/bin/ditto","-c","-k","--sequesterRsrc","--keepParent",build.path,root.appendingPathComponent("build/MacModes-standalone.zip").path])
 print("Built \(app.path)")

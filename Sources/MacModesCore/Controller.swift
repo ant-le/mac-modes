@@ -2,7 +2,6 @@ import Foundation
 
 public protocol ModePlatform: AnyObject {
     func preflight() throws
-    func closeLegacy() throws
     func disconnectProton() throws
     func quitProton() throws
     func stopTailscale() throws
@@ -10,10 +9,8 @@ public protocol ModePlatform: AnyObject {
     func codingServices() throws -> [String: Bool]
     func startCoding() throws
     func rollbackCoding(_ before: [String: Bool]) throws
-    func openApp(_ mode: Mode, previous: OwnedApp?) throws -> OwnedApp?
+    func openApp(_ mode: Mode) throws
     func closeApp(_ mode: Mode) throws
-    func focus(_ enabled: Bool, owned: Bool) throws -> Bool
-    func airDrop(_ disabled: Bool) throws
     func layout(_ mode: Mode) throws
     func connectProton() throws
     func verifyVPN(egress: Bool) throws
@@ -22,7 +19,7 @@ public protocol ModePlatform: AnyObject {
     func verifyIdle() throws
     func t3Running() -> Bool
     func confirm(_ message: String) -> Bool
-    func notify(_ message: String)
+    func notify(_ message: String, critical: Bool)
 }
 public final class Controller {
     public let platform: ModePlatform
@@ -33,6 +30,9 @@ public final class Controller {
     private var privacyError: String?
     public init(platform: ModePlatform, state: JSON, save: @escaping (JSON) throws -> Void) {
         self.platform = platform; value = state; self.save = save
+        let legacy = state["owned_apps"] as? JSON ?? [:]
+        value["recovery_modes"] = Array(Set((state["recovery_modes"] as? [String] ?? []) + Array(legacy.keys))).sorted()
+        for key in ["owned_apps", "dnd_owned", "airdrop_owned", "heartbeat"] { value.removeValue(forKey: key) }
     }
     public var state: JSON { lock.lock(); defer { lock.unlock() }; return value }
     public func update(_ fields: JSON) throws {
@@ -49,16 +49,29 @@ public final class Controller {
         privacyEpoch += 1; privacyError = nil
         try update(["privacy_monitoring": enabled, "vpn_verified": false])
     }
-    public func request(_ operation: String, _ mode: Mode) throws {
+    public func request(_ operation: String, _ mode: Mode, external: Bool = false) throws {
         guard ["set", "toggle"].contains(operation) else { throw Failure("Invalid operation") }
         let s = state
         let target: Mode = operation == "toggle" && s["requested_mode"] as? String == mode.rawValue ? .normal : mode
         let previous = Mode(rawValue: s["mode"] as? String ?? "normal") ?? .normal
+        let privateExposure = previous == .private || s["privacy_monitoring"] as? Bool == true || s["requested_mode"] as? String == "private"
+        if target != .private && privateExposure && !platform.confirm("Close your Zen Privacy container tabs before disconnecting ProtonVPN. Continue?") {
+            try feedback("cancelled", previous, "Switch cancelled"); return
+        }
+        if external && target != previous && [.coding, .music].contains(previous),
+           !platform.confirm("External request to leave " + previous.rawValue.capitalized + ". This may close apps and stop services. Continue?") {
+            try feedback("cancelled", previous, "Switch cancelled"); return
+        }
         if target == previous && s["phase"] as? String == "active" {
             // Re-selecting an active mode also reconciles its unused VPN apps.
             do {
                 if target != .private { try platform.disconnectProton(); try platform.quitProton() }
                 if target != .coding { try platform.stopTailscale() }
+                switch target {
+                case .private: try platform.verifyVPN(egress: true)
+                case .coding: try platform.verifyCoding()
+                default: try optional { try self.platform.verifyIdle() }
+                }
                 lock.lock(); defer { lock.unlock() }
                 // The privacy monitor may have failed the mode during reconciliation.
                 guard value["phase"] as? String == "active" else { return }
@@ -80,10 +93,10 @@ public final class Controller {
         try update(["requested_mode": target.rawValue, "phase": "starting", "last_error": NSNull(), "last_warning": NSNull()])
         var before: [String: Bool]?
         do {
-            var owned = state["owned_apps"] as? [String: JSON] ?? [:]
+            var owned = Set(state["recovery_modes"] as? [String] ?? [])
             // Exit policy applies even to apps that were already open on entry.
             // Include interrupted entries and legacy ownership records for recovery.
-            var leaving = Set(owned.keys)
+            var leaving = owned
             leaving.insert(previous.rawValue)
             if s["phase"] as? String != "active", let requested = s["requested_mode"] as? String {
                 leaving.insert(requested)
@@ -92,29 +105,25 @@ public final class Controller {
                 if let mode = Mode(rawValue: name), [.coding, .music].contains(mode) {
                     try platform.closeApp(mode)
                 }
-                owned.removeValue(forKey: name); try update(["owned_apps": owned])
+                owned.remove(name); try update(["recovery_modes": owned.sorted()])
             }
-            try platform.closeLegacy()
-            if previous == .private || state["airdrop_owned"] as? Bool == true {
-                try optional { try self.platform.airDrop(false) }
-                try update(["airdrop_owned": false])
+            if target != .private {
+                try platform.disconnectProton(); try platform.quitProton()
+                try monitor(false)
             }
-            try monitor(false)
-            if target != .private { try platform.disconnectProton(); try platform.quitProton() }
             if target != .coding { try platform.stopCoding() }
             switch target {
             case .coding:
                 before = try platform.codingServices()
-                try platform.startCoding(); try open(.coding); try dnd(true)
+                try platform.startCoding(); try open(.coding)
                 try optional { try self.platform.layout(.coding) }
             case .music:
-                try dnd(true); try open(.music)
+                try open(.music)
                 try optional { try self.platform.layout(.music) }
             case .private:
-                try dnd(false); try platform.connectProton(); try platform.verifyVPN(egress: true)
-                try optional { try self.platform.airDrop(true) }
+                try platform.connectProton(); try platform.verifyVPN(egress: true)
                 try monitor(true); try platform.openZen()
-            case .normal: try dnd(false)
+            case .normal: break
             }
             lock.lock()
             do {
@@ -124,6 +133,8 @@ public final class Controller {
                 try feedback("active", target, target.rawValue.capitalized + " active")
             }
         } catch {
+            // A failed initial connection may still leave Proton connecting.
+            if target == .private && state["privacy_monitoring"] as? Bool != true { try monitor(true) }
             if let before = before {
                 do { try platform.rollbackCoding(before) }
                 catch { try update(["last_warning": "Kept services after startup failure: " + error.localizedDescription]) }
@@ -136,16 +147,10 @@ public final class Controller {
         try feedback("failed", target, error.localizedDescription)
     }
     private func open(_ mode: Mode) throws {
-        var owned = state["owned_apps"] as? [String: JSON] ?? [:]
-        let app = try platform.openApp(mode, previous: owned[mode.rawValue].flatMap(OwnedApp.init))
-        owned[mode.rawValue] = app?.json
-        try update(["owned_apps": owned])
-    }
-    private func dnd(_ enabled: Bool) throws {
-        try optional {
-            let owned = try self.platform.focus(enabled, owned: self.state["dnd_owned"] as? Bool ?? false)
-            try self.update(["dnd_owned": owned])
-        }
+        var modes = Set(state["recovery_modes"] as? [String] ?? [])
+        modes.insert(mode.rawValue)
+        try update(["recovery_modes": modes.sorted()])
+        try platform.openApp(mode)
     }
     private func optional(_ action: () throws -> Void) throws {
         do { try action() }
@@ -167,7 +172,7 @@ public final class Controller {
             let changed = privacyError != error.localizedDescription
             privacyError = error.localizedDescription
             try update(["phase": "failed", "last_error": error.localizedDescription, "vpn_verified": false])
-            if changed { platform.notify("Private VPN needs attention. Pause browsing and check Proton.") }
+            if changed { platform.notify("Private VPN needs attention. Pause browsing and check Proton.", critical: true) }
         }
     }
     public func health() throws {
@@ -175,6 +180,12 @@ public final class Controller {
         guard s["phase"] as? String == "active", s["mode"] as? String != "private" else { return }
         do {
             if s["mode"] as? String == "coding" { try platform.verifyCoding() } else { try platform.verifyIdle() }
-        } catch { try update(["phase": "failed", "last_error": error.localizedDescription, "vpn_verified": false]) }
+        } catch {
+            if s["mode"] as? String == "coding" {
+                try failed(error, target: .coding)
+            } else if s["last_warning"] as? String != error.localizedDescription {
+                try update(["last_warning": error.localizedDescription])
+            }
+        }
     }
 }

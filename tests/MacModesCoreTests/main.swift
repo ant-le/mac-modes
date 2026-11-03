@@ -21,13 +21,13 @@ test("StorageTests.testAtomicWriteHasPrivatePermissions") { let suite=StorageTes
 test("PlatformTests.testVPNGates") { let suite=PlatformTests();try suite.testVPNGates() }
 test("PlatformTests.testUnknownProtonStatePreserved") { let suite=PlatformTests();try suite.testUnknownProtonStatePreserved() }
 test("PlatformTests.testCommandTimeoutAndFailure") { let suite=PlatformTests();try suite.testCommandTimeoutAndFailure() }
-test("PlatformTests.testOCRReadsGeneratedImage") { let suite=PlatformTests();try suite.testOCRReadsGeneratedImage() }
+if !CommandLine.arguments.contains("--skip-ocr") { test("PlatformTests.testOCRReadsGeneratedImage") { let suite=PlatformTests();try suite.testOCRReadsGeneratedImage() } }
 test("ControllerTests.testAllModePairsAndToggles") { let suite=ControllerTests();try suite.testAllModePairsAndToggles() }
 test("ControllerTests.testPrivateOrderAndGate") { let suite=ControllerTests();try suite.testPrivateOrderAndGate() }
-test("ControllerTests.testLegacyCloseFailureKeepsVPN") { let suite=ControllerTests();try suite.testLegacyCloseFailureKeepsVPN() }
+test("ControllerTests.testPrivateExitCancellationKeepsVPN") { let suite=ControllerTests();try suite.testPrivateExitCancellationKeepsVPN() }
 test("ControllerTests.testCancellationLeavesServicesAndClearsOnNoop") { let suite=ControllerTests();try suite.testCancellationLeavesServicesAndClearsOnNoop() }
-test("ControllerTests.testExistingFocusPreserved") { let suite=ControllerTests();try suite.testExistingFocusPreserved() }
-test("ControllerTests.testOwnedFocusReleased") { let suite=ControllerTests();try suite.testOwnedFocusReleased() }
+test("ControllerTests.testSameModeVerifiesServices") { let suite=ControllerTests();try suite.testSameModeVerifiesServices() }
+test("ControllerTests.testIdleHealthIsWarning") { let suite=ControllerTests();try suite.testIdleHealthIsWarning() }
 test("ControllerTests.testLayoutFailureIsWarning") { let suite=ControllerTests();try suite.testLayoutFailureIsWarning() }
 test("ControllerTests.testStartupFailureRollsBack") { let suite=ControllerTests();try suite.testStartupFailureRollsBack() }
 test("ControllerTests.testOwnershipAndRefusedQuit") { let suite=ControllerTests();try suite.testOwnershipAndRefusedQuit() }
@@ -48,5 +48,11 @@ test("ControllerTests.testPrivateReselectPreservesMonitorFailure") { try Control
 test("ControllerTests.testSameModeReconcileFailureIsReported") { try ControllerTests().testSameModeReconcileFailureIsReported() }
 test("ControllerTests.testPreflightFailureDoesNotCloseUnenteredApp") { try ControllerTests().testPreflightFailureDoesNotCloseUnenteredApp() }
 test("ControllerTests.testPreflightFailurePreservesAbandonedEntryCleanup") { try ControllerTests().testPreflightFailurePreservesAbandonedEntryCleanup() }
+test("ControllerTests.testExternalExitRequiresConfirmation") { try ControllerTests().testExternalExitRequiresConfirmation() }
+test("ControllerTests.testPrivateRetryFailurePreservesMonitoring") { try ControllerTests().testPrivateRetryFailurePreservesMonitoring() }
+test("ControllerTests.testQuitFailurePreservesMonitoring") { try ControllerTests().testQuitFailurePreservesMonitoring() }
+test("ControllerTests.testLegacyRecoveryMigrates") { try ControllerTests().testLegacyRecoveryMigrates() }
+test("ControllerTests.testT3RestartDebounceAndProtectedModes") { try ControllerTests().testT3RestartDebounceAndProtectedModes() }
+test("ControllerTests.testBadConfigStillChecksPrivacy") { try ControllerTests().testBadConfigStillChecksPrivacy() }
 print("\(tests) tests, \(failures) failures")
 exit(failures == 0 ? 0 : 1)

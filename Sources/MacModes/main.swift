@@ -34,7 +34,7 @@ final class ModeBar: NSObject, NSApplicationDelegate {
     var service: ControllerService?
     var hotkeys: Hotkeys?
     var ocrBusy = false
-    var timer: Timer?
+    var currentState: ModeState?
     var hideTimer: Timer?
     var panel: NSPanel?
     var lastFeedback: String?
@@ -79,9 +79,7 @@ final class ModeBar: NSObject, NSApplicationDelegate {
         status.menu = menu
         do { try setupService() }
         catch { fputs("Mac Modes: \(error.localizedDescription)\n", stderr); NSApp.terminate(nil); return }
-        refresh()
-        timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in self?.refresh() }
-        RunLoop.main.add(timer!, forMode: .common)
+
     }
 
     var overlaysEnabled: Bool { !defaults.bool(forKey: "hideOverlays") }
@@ -93,17 +91,6 @@ final class ModeBar: NSObject, NSApplicationDelegate {
         case "private": return "lock.shield"
         default: return "circle"
         }
-    }
-
-    func online() -> Bool {
-        let fd = Darwin.open(runtime.appendingPathComponent("daemon.lock").path, O_RDWR)
-        guard fd >= 0 else { return false }
-        defer { Darwin.close(fd) }
-        if flock(fd, LOCK_EX | LOCK_NB) == 0 {
-            flock(fd, LOCK_UN)
-            return false
-        }
-        return errno == EWOULDBLOCK
     }
 
     func setStatusIcon(_ name: String, label: String) {
@@ -121,8 +108,8 @@ final class ModeBar: NSObject, NSApplicationDelegate {
     }
 
     func refresh() {
-        let connected = online()
-        let state = try? JSONDecoder().decode(ModeState.self, from: Data(contentsOf: runtime.appendingPathComponent("state.json")))
+        let connected = service != nil
+        let state = currentState
         guard let state = state else {
             setStatusIcon("questionmark.circle", label: "Mac Modes: state unavailable")
             summary.title = "Mode state unavailable"
@@ -176,7 +163,7 @@ final class ModeBar: NSObject, NSApplicationDelegate {
     }
 
     func showOverlay(_ title: String, detail: String, mode: String, failed: Bool = false) {
-        guard overlaysEnabled else { return }
+        guard overlaysEnabled || failed else { return }
         hideTimer?.invalidate()
         panel?.orderOut(nil)
         let size = NSSize(width: 390, height: detail.isEmpty ? 90 : 124)

@@ -5,14 +5,10 @@ final class Fake: ModePlatform {
     var calls: [String] = []
     var fail: String?
     var busy = false
-    var browser = false
-    var existingFocus = false
-    var owned: OwnedApp?
     var checker: (() throws -> Void)?
     var onStopTailscale: (() throws -> Void)?
     func call(_ name: String) throws { calls.append(name); if fail == name { throw Failure(name + " failed") } }
     func preflight() throws { try call("preflight"); if busy { throw Cancelled() } }
-    func closeLegacy() throws { if browser { try call("closeLegacy"); browser = false } }
     func disconnectProton() throws { try call("disconnect") }
     func quitProton() throws { try call("quitProton") }
     func stopTailscale() throws { try call("stopTailscale"); try onStopTailscale?() }
@@ -20,14 +16,8 @@ final class Fake: ModePlatform {
     func codingServices() throws -> [String: Bool] { ["tailscale": true, "orbstack": true] }
     func startCoding() throws { try call("startCoding") }
     func rollbackCoding(_ before: [String: Bool]) throws { try call("rollback") }
-    func openApp(_ mode: Mode, previous: OwnedApp?) throws -> OwnedApp? { try call("open_" + mode.rawValue); return owned ?? previous }
+    func openApp(_ mode: Mode) throws { try call("open_" + mode.rawValue) }
     func closeApp(_ mode: Mode) throws { try call("close_" + mode.rawValue) }
-    func focus(_ enabled: Bool, owned: Bool) throws -> Bool {
-        if enabled && !owned && !existingFocus { try call("dnd_on"); return true }
-        if !enabled && owned { try call("dnd_off"); return false }
-        return owned
-    }
-    func airDrop(_ disabled: Bool) throws { try call("airdrop_\(disabled)") }
     func layout(_ mode: Mode) throws { try call("layout") }
     func connectProton() throws { try call("connect") }
     func verifyVPN(egress: Bool) throws { try call("verify"); try checker?() }
@@ -36,7 +26,7 @@ final class Fake: ModePlatform {
     func verifyIdle() throws { try call("healthIdle") }
     func t3Running() -> Bool { false }
     func confirm(_ message: String) -> Bool { !busy }
-    func notify(_ message: String) { calls.append("notify") }
+    func notify(_ message: String, critical: Bool) { calls.append("notify") }
 }
 final class ControllerTests {
     func controller(_ mode: Mode = .normal) -> (Controller, Fake) {
@@ -61,10 +51,10 @@ final class ControllerTests {
         let (d,q) = controller(); q.fail="verify"; try d.request("set",.private)
         expectFalse(q.calls.contains("zen")); expectEqual(d.state["phase"] as? String,"failed")
     }
-    func testLegacyCloseFailureKeepsVPN() throws {
-        let (c,p)=controller(.private); p.browser=true;p.fail="closeLegacy"
+    func testPrivateExitCancellationKeepsVPN() throws {
+        let (c,p)=controller(.private); p.busy=true
         try c.request("set",.normal)
-        expectFalse(p.calls.contains("disconnect")); expectEqual(c.state["phase"] as? String,"failed")
+        expectFalse(p.calls.contains("disconnect")); expectEqual(c.state["mode"] as? String,"private")
     }
     func testCancellationLeavesServicesAndClearsOnNoop() throws {
         let (c,p)=controller(.coding);p.busy=true;try c.request("set",.music)
@@ -72,14 +62,16 @@ final class ControllerTests {
         expectEqual((c.state["feedback"] as? JSON)?["kind"] as? String,"cancelled")
         try c.request("set",.coding);expectTrue(c.state["last_error"] is NSNull)
     }
-    func testExistingFocusPreserved() throws {
-        let (c,p)=controller();p.existingFocus=true
-        try c.request("set",.coding);try c.request("set",.normal)
-        expectFalse(p.calls.contains("dnd_on"));expectFalse(p.calls.contains("dnd_off"))
+    func testSameModeVerifiesServices() throws {
+        for mode in [Mode.coding, .private] {
+            let (c,p)=controller(mode); p.fail = mode == .coding ? "healthCoding" : "verify"
+            try c.request("set",mode)
+            expectEqual(c.state["phase"] as? String,"failed")
+        }
     }
-    func testOwnedFocusReleased() throws {
-        let (c,p)=controller();try c.request("set",.music);try c.request("set",.normal)
-        expectTrue(p.calls.contains("dnd_on"));expectTrue(p.calls.contains("dnd_off"))
+    func testIdleHealthIsWarning() throws {
+        let (c,p)=controller(); p.fail="healthIdle"; try c.health()
+        expectEqual(c.state["phase"] as? String,"active"); expectNotNil(c.state["last_warning"] as? String)
     }
     func testLayoutFailureIsWarning() throws {
         let (c,p)=controller();p.fail="layout";try c.request("set",.coding)
@@ -90,12 +82,12 @@ final class ControllerTests {
         expectTrue(p.calls.contains("rollback"));expectEqual(c.state["phase"] as? String,"failed")
     }
     func testOwnershipAndRefusedQuit() throws {
-        let (c,p)=controller();p.owned=OwnedApp(bundle:"test",pid:1,launchedAt:123)
+        let (c,p)=controller()
         try c.request("set",.coding)
-        expectNotNil((c.state["owned_apps"] as? JSON)?["coding"])
+        expectTrue((c.state["recovery_modes"] as? [String] ?? []).contains("coding"))
         p.calls=[];p.fail="close_coding";try c.request("set",.normal)
         expectFalse(p.calls.contains("stopCoding"));expectFalse(p.calls.contains("disconnect"))
-        expectNotNil((c.state["owned_apps"] as? JSON)?["coding"])
+        expectTrue((c.state["recovery_modes"] as? [String] ?? []).contains("coding"))
     }
     func testPreexistingAppClosesOnModeExit() throws {
         for mode in [Mode.coding, .music] {
@@ -208,10 +200,10 @@ final class ControllerTests {
     }
     func testEverydayBrowserNotOwnedOrClosed() throws {
         let (c,p)=controller();try c.request("set",.private);try c.health();try c.request("set",.normal)
-        expectFalse(p.calls.contains("closeLegacy"));expectNil((c.state["owned_apps"] as? JSON)?["private"])
+        expectFalse(p.calls.contains("close_private"));expectFalse((c.state["recovery_modes"] as? [String] ?? []).contains("private"))
     }
     func testMonitorContinuesAfterFailedExit() throws {
-        let (c,p)=controller(.private);p.browser=true;p.fail="closeLegacy";try c.request("set",.normal)
+        let (c,p)=controller(.private);p.fail="disconnect";try c.request("set",.normal)
         p.fail="verify";try c.privacyHealth();expectTrue(p.calls.contains("verify"));expectTrue(p.calls.contains("notify"))
     }
     func testStaleMonitorResultDoesNotFailNewMode() throws {
@@ -227,4 +219,59 @@ final class ControllerTests {
         expectEqual(done.wait(timeout:.now()+1),.success)
         expectEqual(c.state["phase"] as? String,"failed")
     }
+    func testExternalExitRequiresConfirmation() throws {
+        for mode in [Mode.coding, .music, .private] {
+            let (c,p) = controller(mode); p.busy = true
+            try c.request("set", .normal, external: true)
+            expectTrue(p.calls.isEmpty)
+            expectEqual(c.state["mode"] as? String, mode.rawValue)
+        }
+    }
+    func testPrivateRetryFailurePreservesMonitoring() throws {
+        let (c,p) = controller(.private)
+        try c.update(["phase": "failed", "privacy_monitoring": true])
+        p.fail = "connect"; try c.request("set", .private)
+        p.fail = "verify"; try c.privacyHealth()
+        expectTrue(p.calls.contains("notify"))
+        expectEqual(c.state["privacy_monitoring"] as? Bool, true)
+    }
+    func testQuitFailurePreservesMonitoring() throws {
+        let (c,p) = controller(.private)
+        p.fail = "quitProton"; try c.request("set", .normal)
+        p.fail = "verify"; try c.privacyHealth()
+        expectTrue(p.calls.contains("notify"))
+    }
+    func testLegacyRecoveryMigrates() throws {
+        let p = Fake()
+        let c = Controller(platform:p,state:["mode":"normal", "phase":"failed", "owned_apps":["music":["pid":123]]]) { _ in }
+        try c.request("set", .normal)
+        expectTrue(p.calls.contains("close_music")); expectNil(c.state["owned_apps"])
+    }
+
+    func testT3RestartDebounceAndProtectedModes() throws {
+        var automation = T3Automation(running: true)
+        func tick(_ running: Bool, _ mode: Mode, _ time: Double) -> Mode? {
+            automation.target(running: running, mode: mode, active: true, now: time, launchEnabled: true, quitEnabled: true, debounce: 8)
+        }
+        expectNil(tick(false, .coding, 0))
+        expectNil(tick(false, .coding, 7))
+        expectNil(tick(true, .coding, 7.5))
+        expectNil(tick(false, .coding, 8))
+        expectNil(tick(false, .coding, 15))
+        expectEqual(tick(false, .coding, 16), .normal)
+        expectNil(tick(true, .private, 17))
+        expectNil(tick(false, .music, 18))
+        expectNil(tick(true, .music, 19))
+        expectNil(tick(false, .normal, 20))
+        expectEqual(tick(true, .normal, 21), .coding)
+    }
+
+    func testBadConfigStillChecksPrivacy() throws {
+        let (c,p) = controller(.private); p.fail = "verify"
+        var reported = false
+        try privacyTick(controller:c,checker:p,reload:{ throw Failure("bad config") },report:{ _ in reported = true })
+        expectTrue(reported); expectTrue(p.calls.contains("verify")); expectTrue(p.calls.contains("notify"))
+        expectEqual(c.state["phase"] as? String,"failed")
+    }
+
 }

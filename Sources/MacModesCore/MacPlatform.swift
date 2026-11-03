@@ -33,25 +33,21 @@ public final class MacPlatform: ModePlatform {
     public var config: JSON
     public let runtime: URL
     public var confirmation: ((String) -> Bool)?
-    public var notification: ((String) -> Void)?
+    public var notification: ((String, Bool) -> Void)?
     public init(config: JSON, runtime: URL) { self.config = config; self.runtime = runtime }
     func string(_ key: String) throws -> String { guard let s = config[key] as? String else { throw Failure("Missing config: " + key) }; return s }
     func run(_ args: [String], timeout: Double = 30, check: Bool = true) throws -> String { try command(args, timeout: timeout, check: check).output }
-    public func notify(_ message: String) { notification?(message) }
+    public func notify(_ message: String, critical: Bool = false) { notification?(message, critical) }
     public func confirm(_ message: String) -> Bool { confirmation?(message) ?? false }
     public func t3Running() -> Bool { NSRunningApplication.runningApplications(withBundleIdentifier: config["t3_bundle"] as? String ?? "").contains { !$0.isTerminated } }
     func bundle(_ mode: Mode) throws -> String { try string(mode == .coding ? "t3_bundle" : "music_bundle") }
-    func apps(_ bundle: String) -> [OwnedApp] {
-        NSRunningApplication.runningApplications(withBundleIdentifier: bundle).compactMap {
-            guard let date = $0.launchDate, !$0.isTerminated else { return nil }
-            return OwnedApp(bundle: bundle, pid: $0.processIdentifier, launchedAt: date.timeIntervalSince1970)
-        }
-    }
-    public func openApp(_ mode: Mode, previous: OwnedApp?) throws -> OwnedApp? {
-        let id = try bundle(mode), existing = apps(try bundle(mode))
+    public func openApp(_ mode: Mode) throws {
+        let id = try bundle(mode)
         _ = try run(["/usr/bin/open", "-b", id])
-        if !existing.isEmpty { return previous.flatMap { existing.contains($0) ? $0 : nil } }
-        for _ in 0..<40 { if let app = apps(id).first { return app }; Thread.sleep(forTimeInterval: 0.25) }
+        for _ in 0..<40 {
+            if NSRunningApplication.runningApplications(withBundleIdentifier: id).contains(where: { !$0.isTerminated }) { return }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
         throw Failure("App did not launch: " + id)
     }
     public func closeApp(_ mode: Mode) throws {
@@ -83,8 +79,7 @@ public final class MacPlatform: ModePlatform {
         throw Failure("App is still running after quit: " + bundle)
     }
     public func quitProton() throws {
-        guard try legacyPIDs().isEmpty,
-              try protonServices().allSatisfy({ $0.1 == "Disconnected" }) else {
+        guard try protonServices().allSatisfy({ $0.1 == "Disconnected" }) else {
             throw Failure("Proton must disconnect safely before its app quits")
         }
         try quitBundleAndWait(string("proton_bundle"))
@@ -112,7 +107,11 @@ public final class MacPlatform: ModePlatform {
         }
         throw Failure("Tailscale did not disconnect")
     }
-    public func orbRunning() throws -> Bool { try run([string("orbctl"), "status"], check: false).lowercased() == "running" }
+    public func orbRunning() throws -> Bool {
+        let status = try run([string("orbctl"), "status"]).lowercased()
+        guard ["running", "stopped"].contains(status) else { throw Failure("Unknown OrbStack status: " + status) }
+        return status == "running"
+    }
     public func preflight() throws {
         guard config["confirm_stop_workloads"] as? Bool != false, try orbRunning() else { return }
         let containers = try run([string("docker"), "--context", "orbstack", "ps", "-q"])
@@ -122,7 +121,7 @@ public final class MacPlatform: ModePlatform {
     }
     public func codingServices() throws -> [String: Bool] { try ["tailscale": tailscaleState() == "Running", "orbstack": orbRunning()] }
     public func startCoding() throws {
-        guard try !protonConnected() else { throw Failure("Disconnect Proton before connecting Tailscale") }
+        guard try protonServices().allSatisfy({ $0.1 == "Disconnected" }) else { throw Failure("Disconnect Proton before connecting Tailscale") }
         _ = try run([string("orbctl"), "start"], timeout: 90)
         if try tailscaleState() != "Running" { _ = try run([string("tailscale"), "up", "--timeout=30s"], timeout: 35) }
         try verifyCoding()
@@ -140,16 +139,16 @@ public final class MacPlatform: ModePlatform {
         if before["tailscale"] != true { try tailscaleDown() }
     }
     public func verifyCoding() throws {
-        guard try !protonConnected(), try tailscaleState() == "Running", try orbRunning() else { throw Failure("Coding requires Tailscale and OrbStack running, and Proton disconnected") }
+        guard try protonServices().allSatisfy({ $0.1 == "Disconnected" }), try tailscaleState() == "Running", try orbRunning() else { throw Failure("Coding requires Tailscale and OrbStack running, and Proton disconnected") }
     }
     public func verifyIdle() throws {
-        if try tailscaleState() == "Running" || orbRunning() { throw Failure("Coding services started outside Coding; choose a mode to reconcile") }
+        if try !protonServices().allSatisfy({ $0.1 == "Disconnected" }) || tailscaleState() == "Running" || orbRunning() { throw Failure("Services running outside their mode; choose a mode to reconcile") }
     }
     public static func parseProton(_ text: String) throws -> [(String, String)] {
         let regex = try NSRegularExpression(pattern: #"\(([^)]+)\)\s+([0-9A-Fa-f-]{36})"#)
-        return text.components(separatedBy: .newlines).filter { $0.lowercased().contains("proton") }.compactMap { line in
+        return try text.components(separatedBy: .newlines).filter { $0.lowercased().contains("proton") }.map { line in
             guard let match = regex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
-                  let a = Range(match.range(at: 1), in: line), let b = Range(match.range(at: 2), in: line) else { return nil }
+                  let a = Range(match.range(at: 1), in: line), let b = Range(match.range(at: 2), in: line) else { throw Failure("Unrecognized Proton service status") }
             return (String(line[b]), String(line[a]))
         }
     }
@@ -165,7 +164,6 @@ public final class MacPlatform: ModePlatform {
         throw Failure("Proton did not connect. Connect once in its app, then retry")
     }
     public func disconnectProton() throws {
-        guard try legacyPIDs().isEmpty else { throw Failure("Legacy private browser is still open; keeping VPN connected") }
         for (service, state) in try protonServices() where state != "Disconnected" { _ = try run(["/usr/sbin/scutil", "--nc", "stop", service]) }
         for _ in 0..<20 { if try protonServices().allSatisfy({ $0.1 == "Disconnected" }) { return }; Thread.sleep(forTimeInterval: 0.5) }
         throw Failure("Proton is still connected")
@@ -198,51 +196,6 @@ public final class MacPlatform: ModePlatform {
         let app = URL(fileURLWithPath: try string("zen_executable")).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         _ = try run(["/usr/bin/open", "-a", app.path]); notify("Proton verified. Select your Privacy container in Zen.")
     }
-    func legacyPIDs() throws -> [Int32] {
-        let profile = (try string("private_profile") as NSString).expandingTildeInPath
-        let executable = try string("zen_executable")
-        return try run(["/bin/ps", "-axo", "pid=,command="]).components(separatedBy: .newlines).compactMap { line in
-            let parts = line.trimmingCharacters(in: .whitespaces).split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
-            guard parts.count == 2, parts[1].hasPrefix(executable + " "),
-                  (parts[1].contains("--profile " + profile + " ") || parts[1].hasSuffix("--profile " + profile)) else { return nil }
-            return Int32(parts[0])
-        }
-    }
-    func descendants(_ roots: [Int32]) throws -> Set<Int32> {
-        var parents: [Int32: Int32] = [:]
-        for line in try run(["/bin/ps", "-axo", "pid=,ppid="]).split(separator: "\n") {
-            let parts = line.split(whereSeparator: { $0.isWhitespace })
-            if parts.count == 2, let pid = Int32(parts[0]), let parent = Int32(parts[1]) { parents[pid] = parent }
-        }
-        var found = Set(roots)
-        while true { let children = Set(parents.filter { found.contains($0.value) }.keys); if children.isSubset(of: found) { return found }; found.formUnion(children) }
-    }
-    public func closeLegacy() throws {
-        let roots = try legacyPIDs(); guard !roots.isEmpty else { return }
-        let suspendedURL = runtime.appendingPathComponent("suspended.json")
-        let suspended = (try? JSONSerialization.jsonObject(with: Data(contentsOf: suspendedURL))) as? [Int32] ?? []
-        let owned = try descendants(roots)
-        if !owned.intersection(suspended).isEmpty {
-            do { try connectProton(); try verifyVPN(egress: true); for pid in owned.intersection(suspended) { kill(pid, SIGCONT) } }
-            catch {
-                guard confirm("VPN recovery failed. Discard only the old suspended Zen session? Downloads may be incomplete. Everyday Zen stays open.") else { throw error }
-                for pid in owned.sorted(by: >) { kill(pid, SIGKILL) }
-            }
-            try? FileManager.default.removeItem(at: suspendedURL)
-        }
-        for pid in try legacyPIDs() {
-            if let app = NSRunningApplication(processIdentifier: pid), !app.terminate() { throw Failure("Legacy Zen refused to quit") }
-        }
-        for _ in 0..<30 { if try legacyPIDs().isEmpty { return }; Thread.sleep(forTimeInterval: 0.5) }
-        throw Failure("Legacy Zen is still open; keeping VPN connected")
-    }
-    public func focus(_ enabled: Bool, owned: Bool) throws -> Bool {
-        if owned { throw Failure("A previous controller enabled DND. Release it manually in Control Center; native Focus integration is disabled") }
-        return false
-    }
-    public func airDrop(_ disabled: Bool) throws {
-        // Optional integrations are configured separately; no undocumented preference writes.
-    }
     public func layout(_ mode: Mode) throws {
         guard AXIsProcessTrusted() else { throw Failure("Allow Mac Modes in Accessibility to resize windows") }
         let id = try bundle(mode)
@@ -250,17 +203,21 @@ public final class MacPlatform: ModePlatform {
             if let app = NSRunningApplication.runningApplications(withBundleIdentifier: id).first {
                 let element = AXUIElementCreateApplication(app.processIdentifier)
                 var result: CFTypeRef?
-                if AXUIElementCopyAttributeValue(element, kAXWindowsAttribute as CFString, &result) == .success,
-                   let windows = result as? [AXUIElement], let window = windows.first {
+                if AXUIElementCopyAttributeValue(element, kAXMainWindowAttribute as CFString, &result) != .success {
+                    _ = AXUIElementCopyAttributeValue(element, kAXFocusedWindowAttribute as CFString, &result)
+                }
+                if let result = result, CFGetTypeID(result) == AXUIElementGetTypeID() {
+                    let window = unsafeBitCast(result, to: AXUIElement.self)
                     var position: CFTypeRef?
                     _ = AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &position)
                     var point = CGPoint.zero
-                    if let position = position, CFGetTypeID(position) == AXValueGetTypeID() { AXValueGetValue(unsafeBitCast(position, to: AXValue.self), .cgPoint, &point) }
+                    guard let position = position, CFGetTypeID(position) == AXValueGetTypeID(), AXValueGetValue(unsafeBitCast(position, to: AXValue.self), .cgPoint, &point) else { throw Failure("Could not read window position") }
                     let frames: [CGRect] = DispatchQueue.main.sync { NSScreen.screens.map { $0.visibleFrame } }
                     let primaryHeight: CGFloat = DispatchQueue.main.sync { NSScreen.screens.first?.frame.maxY ?? 0 }
                     let frame = frames.first { $0.contains(CGPoint(x: point.x + 20, y: primaryHeight - point.y - 20)) } ?? frames.first ?? .zero
                     var origin = CGPoint(x: frame.minX, y: primaryHeight - frame.maxY), size = frame.size
                     guard let pos = AXValueCreate(.cgPoint, &origin), let dimensions = AXValueCreate(.cgSize, &size),
+                          AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, dimensions) == .success,
                           AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, pos) == .success,
                           AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, dimensions) == .success else { throw Failure("App does not allow this window layout") }
                     _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString); return
